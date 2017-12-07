@@ -8,13 +8,11 @@
 1. 使用这些区域特征来训练多个SVM来做物体识别，每个SVM预测一个区域是不是包含某个物体
 1. 使用这些区域特征来训练线性回归器将提议区域
 
-直观上R-CNN很好理解，但问题是它可能特别慢。一张图片我们可能选出上千个区域，导致一张图片需要做上千次预测。虽然跟微调不一样，这里训练可以不用更新用来抽特征的卷积神经网络，从而我们可以事先算好每个区域的特征并保存。但对于预测，我们无法避免这个。从而导致R-CNN很难实际中被使用。
+因为速度的原因，导致R-CNN很难实际中被使用。
 
 ## SSD: 单发多框检测器
 
-在R-CNN系列模型里。区域提议和分类是分作两块来进行的。SSD则将其统一成一个步骤来使得模型更加简单并且速度更快，这也是为什么它被称之为**单发**的原因。
-
-它跟Faster R-CNN主要有两点不一样
+SSD跟Faster R-CNN主要有两点不一样
 
 1. 对于锚框，我们不再首先判断它是不是含有感兴趣物体，再将正类锚框放入真正物体分类。SSD里我们直接使用一个`num_class+1`类分类器来判断它对应的是哪类物体，还是只是背景。我们也不再有额外的回归器对边框再进一步预测，而是直接使用单个回归器来预测真实边框。
 1. SSD不只是对卷积神经网络输出的特征做预测，它会进一步将特征通过卷积和池化层变小来做预测。这样达到多尺度预测的效果。
@@ -90,7 +88,7 @@ print(batch)
 
 ### 图示数据
 
-我们画出几张图片和其对应的标号。可以看到比卡丘的角度大小位置在每张图图片都不一样。不过也注意到这个数据集是直接将二次元动漫皮卡丘跟三次元背景相结合。可能通过简单判断区域的色彩直方图就可以有效的区别是不是有我们要的物体。我们用这个简单数据集来演示SSD是如何工作的。实际中遇到的数据集通常会复杂很多。
+我们画出几张图片和其对应的标号。
 
 ```{.python .input  n=4}
 %matplotlib inline
@@ -290,9 +288,9 @@ y = bnet(x)
 y.shape
 ```
 
-### 创建一个玩具SSD模型
+### 创建一个简单的SSD模型
 
-现在我们可以创建一个玩具SSD模型了。我们称之为玩具是因为这个网络不管是层数还是锚框个数都比较小，仅仅适合之后我们之后使用的一个小数据集。但这个模型不会影响我们介绍SSD。
+现在我们可以创建一个简单的SSD模型了。
 
 这个网络包含四块。主体网络，三个减半模块，以及五个物体类别和边框预测模块。其中预测分别应用在在主体网络输出，减半模块输出，和最后的全局池化层上。
 
@@ -375,90 +373,13 @@ class ToySSD(gluon.Block):
         return anchors, class_preds, box_preds
 ```
 
-我们看看一下输入图片的形状是如何改变的，已经输出的形状。
-
-```{.python .input  n=16}
-net = ToySSD(num_classes=2, verbose=True)
-net.initialize()
-x = batch.data[0][0:1]
-print('Input:', x.shape)
-anchors, class_preds, box_preds = net(x)
-print('Output achors:', anchors.shape)
-print('Output class predictions:', class_preds.shape)
-print('Output box predictions:', box_preds.shape)
-```
-
 ## 训练
-
-之前的教程我们主要是关注分类。对于分类的预测结果和真实的标号，我们通过交叉熵来计算他们的差异。但物体检测里我们需要预测边框。这里我们先引入一个概率来描述两个边框的距离。
-
-### IoU：交集除并集
-
-我们知道判断两个集合的相似度最常用的衡量叫做Jaccard距离，给定集合 $A$ 和 $B$，它的定义是 
-
-$$J(A,B) = \frac{|A\cap B|}{| A \cup B|}$$
-
-边框可以看成是像素的集合，我们可以类似的定义它。这个标准通常被称之为 Intersection over Union (IoU)。
-
-![](../img/iou.svg)
-
-大的值表示两个边框很相似，而小的值则表示不相似。
 
 ### 损失函数
 
-虽然每张图片里面通常只有几个标注的边框，但SSD会生成大量的锚框。可以想象很多锚框都不会框住感兴趣的物体，就是说跟任何对应感兴趣物体的表框的IoU都小于某个阈值。这样就会产生大量的负类锚框，或者说对应标号为0的锚框。对于这类锚框有两点要考虑的：
+对于分类问题，最常用的损失函数是之前一直使用的交叉熵。
 
-1. 边框预测的损失函数不应该包括负类锚框，因为它们并没有对应的真实边框
-1. 因为负类锚框数目可能远多于其他，我们可以只保留其中的一些。而且是保留那些目前预测最不确信它是负类的，就是对类0预测值排序，选取数值最小的哪一些困难的负类锚框。
-
-我们可以使用`MultiBoxTarget`来完成上面这两个操作。
-
-```{.python .input  n=17}
-from mxnet.contrib.ndarray import MultiBoxTarget
-def training_targets(anchors, class_preds, labels):
-    class_preds = class_preds.transpose(axes=(0,2,1))
-    return MultiBoxTarget(anchors, labels, class_preds)
-
-out = training_targets(anchors, class_preds, batch.label[0][0:1]) 
-out
-```
-
-它返回三个`NDArray`，分别是
-
-1. 预测的边框跟真实边框的偏移，大小是`batch_size x (num_anchors*4)`
-1. 用来遮掩不需要的负类锚框的掩码，大小跟上面一致
-1. 锚框的真实的标号，大小是`batch_size x num_anchors`
-
-我们可以计算这次只选中了多少个锚框进入损失函数：
-
-```{.python .input  n=18}
-out[1].sum()/4
-```
-
-然后我们可以定义需要的损失函数了。
-
-对于分类问题，最常用的损失函数是之前一直使用的交叉熵。这里我们定义一个类似于交叉熵的损失，不同于交叉熵的定义 $\log(p_j)$，这里 $j$ 是真实的类别，且 $p_j$ 是对于的预测概率。我们使用一个被称之为关注损失的函数，给定正的$\gamma$和$\alpha$，它的定义是
-
-$$ - \alpha (1-p_j)^{\gamma} \log(p_j) $$
-
-下图我们演示不同$\gamma$导致的变化。可以看到，增加$\gamma$可以使得对正类预测值比较大时损失变小。
-
-```{.python .input  n=20}
-import numpy as np
-
-def focal_loss(gamma, x):
-    return - (1-x)**gamma*np.log(x)
-
-x = np.arange(0.01, 1, .01)
-gammas = [0,.25,.5,1]
-for i,g in enumerate(gammas):
-    plt.plot(x, focal_loss(g,x), colors[i])
-
-plt.legend(['gamma='+str(g) for g in gammas])
-plt.show()
-```
-
-这个自定义的损失函数可以简单通过继承`gluon.loss.Loss`来实现。
+这里可以简单通过继承`gluon.loss.Loss`来实现。
 
 ```{.python .input  n=18}
 class FocalLoss(gluon.loss.Loss):
@@ -478,31 +399,9 @@ cls_loss = FocalLoss()
 cls_loss
 ```
 
-对于边框的预测是一个回归问题。通常可以选择平方损失函数（L2损失）$f(x)=x^2$。但这个损失对于比较大的误差的惩罚很高。我们可以采用稍微缓和一点绝对损失函数（L1损失）$f(x)=|x|$，它是随着误差线性增长，而不是平方增长。但这个函数在0点处导数不唯一，因此可能会影响收敛。一个通常的解决办法是在0点附近使用平方函数使得它更加平滑。它被称之为平滑L1损失函数。它通过一个参数$\sigma$来控制平滑的区域：
+对于边框的预测是一个回归问题。我们可以采用平滑L1损失函数。
 
-$$
-f(x) =
-    \begin{cases}
-    (\sigma x)^2/2,& \text{if }x < 1/\sigma^2\\
-    |x|-0.5/\sigma^2,& \text{otherwise}
-    \end{cases}
-$$
-
-我们图示不同的$\sigma$的平滑L1损失和L2损失的区别。
-
-```{.python .input}
-scales = [.5, 1, 10]
-x = nd.arange(-2, 2, 0.1)
-
-for i,s in enumerate(scales):
-    y = nd.smooth_l1(x, scalar=s)
-    plt.plot(x.asnumpy(), y.asnumpy(), color=colors[i])
-plt.plot(x.asnumpy(), (x**2).asnumpy(), color=colors[len(scales)])
-plt.legend(['scale='+str(s) for s in scales]+['Square loss'])
-plt.show()
-```
-
-我们同样通过继承`Loss`来定义这个损失。同时它接受一个额外参数`mask`，这是用来屏蔽掉不需要被惩罚的负例样本。
+我们同样通过继承`Loss`来定义这个损失。
 
 ```{.python .input  n=19}
 class SmoothL1Loss(gluon.loss.Loss):
@@ -518,8 +417,6 @@ box_loss
 ```
 
 ### 评估测量
-
-对于分类好坏我们可以沿用之前的分类精度。评估边框预测的好坏的一个常用是是平均绝对误差。记得在[线性回归](../chapter_supervised-learning/linear-regression-scratch.md)我们使用了平均平方误差。但跟上面对损失函数的讨论一样，平方误差对于大的误差给予过大的值，从而数值上过于敏感。平均绝对误差就是将二次项替换成绝对值，具体来说就是预测的边框和真实边框在4个维度上的差值的绝对值。
 
 ```{.python .input  n=20}
 from mxnet import metric
@@ -548,7 +445,7 @@ trainer = gluon.Trainer(net.collect_params(),
 
 ### 训练模型
 
-训练函数跟前面的不一样在于网络会有多个输出，而且有两个损失函数。
+训练模型有两个损失函数。
 
 ```{.python .input  n=25}
 import time
@@ -600,7 +497,7 @@ def process_image(fname):
 
 ```
 
-然后我们跟训练那样预测表框和其对应的物体。但注意到因为我们对每个像素都会生成数个锚框，这样我们可能会预测出大量相似的表框，从而导致结果非常嘈杂。一个办法是对于IoU比较高的两个表框，我们只保留预测执行度比较高的那个。这个算法（称之为non maximum suppression）在`MultiBoxDetection`里实现了。下面我们实现预测函数：
+实现预测函数：
 
 ```{.python .input  n=27}
 from mxnet.contrib.ndarray import MultiBoxDetection
